@@ -213,6 +213,37 @@ def process_workbook(source_files, target_file):
         "plan_count": len(all_data_maps),
     }
 
+def render_template_downloads() -> None:
+    st.subheader("檔案下載")
+
+    assets = [
+        (
+            Path("assets") / "公版_IED試驗報告.xlsm",
+            "下載試驗報告",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        (
+            Path("assets") / "公版_變電所_測試程序.psx",
+            "下載測試程序",
+            "application/octet-stream",
+        ),
+    ]
+
+    for path, label, mime in assets:
+        if path.exists():
+            with path.open("rb") as f:
+                st.download_button(
+                    label=label,
+                    data=f.read(),
+                    file_name=path.name,
+                    mime=mime,
+                    use_container_width=True,
+                )
+        else:
+            st.info(f"尚未找到 `{path}`")
+
+
+
 
 
 
@@ -269,34 +300,4 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     mime="application/vnd.ms-excel",
                     use_container_width=True,
                 )
-
-def render_template_downloads() -> None:
-    st.subheader("檔案下載")
-
-    assets = [
-        (
-            Path("assets") / "公版_IED試驗報告.xlsm",
-            "下載試驗報告",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ),
-        (
-            Path("assets") / "公版_變電所_測試程序.psx",
-            "下載測試程序",
-            "application/octet-stream",
-        ),
-    ]
-
-    for path, label, mime in assets:
-        if path.exists():
-            with path.open("rb") as f:
-                st.download_button(
-                    label=label,
-                    data=f.read(),
-                    file_name=path.name,
-                    mime=mime,
-                    use_container_width=True,
-                )
-        else:
-            st.info(f"尚未找到 `{path}`")
-
 
