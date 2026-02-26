@@ -216,7 +216,6 @@ def process_workbook(source_files, target_file):
 
 def render_template_downloads() -> None:
     st.subheader("下載公版與測試程序")
-    st.caption("請先將檔案放到專案的 assets 資料夾。")
 
     assets = [
         (
@@ -297,5 +296,6 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     mime="application/vnd.ms-excel",
                     use_container_width=True,
                 )
+
 
 
