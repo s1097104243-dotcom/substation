@@ -1,10 +1,17 @@
 import io
 import re
+import zipfile
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
+
+
+NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS = {"main": NS_MAIN, "r": NS_REL, "pkg": NS_PKG_REL}
 
 
 def normalize_header(value: object) -> str:
@@ -143,6 +150,157 @@ def to_excel_value(value):
         return text
 
 
+def qn(local_name: str) -> str:
+    return f"{{{NS_MAIN}}}{local_name}"
+
+
+def normalize_zip_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("/"):
+        normalized = normalized[1:]
+    if not normalized.startswith("xl/"):
+        normalized = f"xl/{normalized}"
+    return normalized
+
+
+def parse_cell_ref(ref: str):
+    m = re.match(r"^([A-Z]+)(\d+)$", ref or "")
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def column_to_index(col_letters: str) -> int:
+    index = 0
+    for ch in col_letters:
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index
+
+
+def load_shared_strings(zip_entries: dict[str, bytes]) -> list[str]:
+    shared = zip_entries.get("xl/sharedStrings.xml")
+    if shared is None:
+        return []
+    root = ET.fromstring(shared)
+    result = []
+    for si in root.findall("main:si", NS):
+        parts = []
+        for t in si.findall(".//main:t", NS):
+            parts.append(t.text or "")
+        result.append("".join(parts))
+    return result
+
+
+def get_cell_value(cell, shared_strings: list[str]):
+    if cell is None:
+        return None
+
+    cell_type = cell.get("t")
+    if cell_type == "inlineStr":
+        t_node = cell.find("main:is/main:t", NS)
+        return (t_node.text if t_node is not None else None)
+
+    v_node = cell.find("main:v", NS)
+    if v_node is None or v_node.text is None:
+        return None
+    raw = v_node.text
+
+    if cell_type == "s":
+        try:
+            idx = int(float(raw))
+            return shared_strings[idx] if 0 <= idx < len(shared_strings) else None
+        except Exception:
+            return None
+    return raw
+
+
+def set_cell_value(cell, value) -> None:
+    for node_name in ("f", "v", "is"):
+        for child in cell.findall(f"main:{node_name}", NS):
+            cell.remove(child)
+
+    if value is None:
+        cell.attrib.pop("t", None)
+        return
+
+    if isinstance(value, bool):
+        cell.attrib.pop("t", None)
+        v = ET.SubElement(cell, qn("v"))
+        v.text = "1" if value else "0"
+        return
+
+    if isinstance(value, (int, float)):
+        cell.attrib.pop("t", None)
+        v = ET.SubElement(cell, qn("v"))
+        v.text = str(value)
+        return
+
+    text = str(value)
+    if text == "":
+        cell.attrib.pop("t", None)
+        return
+
+    cell.set("t", "inlineStr")
+    is_node = ET.SubElement(cell, qn("is"))
+    t_node = ET.SubElement(is_node, qn("t"))
+    if text != text.strip():
+        t_node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t_node.text = text
+
+
+def get_or_create_row(sheet_data, row_map: dict[int, ET.Element], row_idx: int):
+    row = row_map.get(row_idx)
+    if row is not None:
+        return row
+
+    row = ET.Element(qn("row"), {"r": str(row_idx)})
+    rows = list(sheet_data.findall("main:row", NS))
+    inserted = False
+    for i, existing in enumerate(rows):
+        try:
+            existing_idx = int(existing.get("r", "0"))
+        except ValueError:
+            existing_idx = 0
+        if existing_idx > row_idx:
+            sheet_data.insert(i, row)
+            inserted = True
+            break
+    if not inserted:
+        sheet_data.append(row)
+    row_map[row_idx] = row
+    return row
+
+
+def get_or_create_cell(row_elem, cell_ref: str):
+    for c in row_elem.findall("main:c", NS):
+        if c.get("r") == cell_ref:
+            return c
+
+    target = ET.Element(qn("c"), {"r": cell_ref})
+    parsed = parse_cell_ref(cell_ref)
+    target_idx = column_to_index(parsed[0]) if parsed else 0
+
+    cells = list(row_elem.findall("main:c", NS))
+    inserted = False
+    for i, existing in enumerate(cells):
+        parsed_existing = parse_cell_ref(existing.get("r", ""))
+        if not parsed_existing:
+            continue
+        if column_to_index(parsed_existing[0]) > target_idx:
+            row_elem.insert(i, target)
+            inserted = True
+            break
+    if not inserted:
+        row_elem.append(target)
+    return target
+
+
+def to_xml_bytes(root: ET.Element) -> bytes:
+    buffer = io.BytesIO()
+    ET.ElementTree(root).write(buffer, encoding="utf-8", xml_declaration=True)
+    return buffer.getvalue()
+
+
 def process_workbook(source_files, target_file):
     all_structured_data = []
     parse_logs = []
@@ -178,50 +336,101 @@ def process_workbook(source_files, target_file):
         raise ValueError("沒有可用的 Plan 對應資料")
 
     target_file.seek(0)
-    suffix = Path(target_file.name).suffix.lower()
-    keep_vba = suffix == ".xlsm"
+    target_bytes = target_file.read()
+    with zipfile.ZipFile(io.BytesIO(target_bytes), "r") as zin:
+        zip_entries = {name: zin.read(name) for name in zin.namelist()}
 
-    wb_write = load_workbook(target_file, keep_vba=keep_vba)
-    target_file.seek(0)
-    wb_values = load_workbook(target_file, data_only=True, keep_vba=keep_vba)
+    workbook_xml = zip_entries.get("xl/workbook.xml")
+    workbook_rels = zip_entries.get("xl/_rels/workbook.xml.rels")
+    if workbook_xml is None or workbook_rels is None:
+        raise ValueError("目標檔案不是有效的 Excel 結構，無法處理。")
+
+    wb_root = ET.fromstring(workbook_xml)
+    rels_root = ET.fromstring(workbook_rels)
+    shared_strings = load_shared_strings(zip_entries)
+
+    rid_to_sheet_path = {}
+    for rel in rels_root.findall("pkg:Relationship", NS):
+        if rel.get("Type", "").endswith("/worksheet"):
+            rel_id = rel.get("Id")
+            target = rel.get("Target")
+            if rel_id and target:
+                rid_to_sheet_path[rel_id] = normalize_zip_path(target)
 
     matched_count = 0
     skipped_count = 0
     write_logs = []
 
-    for ws in wb_write.worksheets:
-        if not ws.title.startswith("特性_"):
+    for sheet in wb_root.findall("main:sheets/main:sheet", NS):
+        ws_name = sheet.get("name", "")
+        if not ws_name.startswith("特性_"):
             continue
 
-        ws_values = wb_values[ws.title]
-        o1_value = ws_values["O1"].value
-        if o1_value is None:
-            o1_value = ws["O1"].value
+        rid = sheet.get(f"{{{NS_REL}}}id")
+        sheet_path = rid_to_sheet_path.get(rid or "")
+        if not sheet_path or sheet_path not in zip_entries:
+            skipped_count += 1
+            write_logs.append(f"--- 跳過 [{ws_name}]：找不到工作表資料")
+            continue
+
+        ws_root = ET.fromstring(zip_entries[sheet_path])
+        sheet_data = ws_root.find("main:sheetData", NS)
+        if sheet_data is None:
+            skipped_count += 1
+            write_logs.append(f"--- 跳過 [{ws_name}]：工作表缺少 sheetData")
+            continue
+
+        row_map: dict[int, ET.Element] = {}
+        cell_map: dict[str, ET.Element] = {}
+        for row_elem in sheet_data.findall("main:row", NS):
+            try:
+                row_idx = int(row_elem.get("r", "0"))
+            except ValueError:
+                continue
+            row_map[row_idx] = row_elem
+            for cell in row_elem.findall("main:c", NS):
+                ref = cell.get("r")
+                if ref:
+                    cell_map[ref] = cell
+
+        o1_value = get_cell_value(cell_map.get("O1"), shared_strings)
 
         if o1_value is None:
             skipped_count += 1
-            write_logs.append(f"--- 跳過 [{ws.title}]：O1 為空")
+            write_logs.append(f"--- 跳過 [{ws_name}]：O1 為空")
             continue
 
         panel_name = str(o1_value).strip()
         if panel_name not in all_data_maps:
             skipped_count += 1
-            write_logs.append(f"--- 跳過 [{ws.title}]：找不到盤名 [{panel_name}]")
+            write_logs.append(f"--- 跳過 [{ws_name}]：找不到盤名 [{panel_name}]")
             continue
 
         current_map = all_data_maps[panel_name]
         write_count = 0
-        for r in range(1, ws.max_row + 1):
-            label = ws[f"CN{r}"].value
+
+        for cell_ref, cell in list(cell_map.items()):
+            parsed = parse_cell_ref(cell_ref)
+            if not parsed or parsed[0] != "CN":
+                continue
+
+            row_idx = parsed[1]
+            label = get_cell_value(cell, shared_strings)
             if label is not None and label in current_map:
-                ws[f"CO{r}"].value = to_excel_value(current_map[label])
+                target_ref = f"CO{row_idx}"
+                row_elem = get_or_create_row(sheet_data, row_map, row_idx)
+                target_cell = get_or_create_cell(row_elem, target_ref)
+                set_cell_value(target_cell, to_excel_value(current_map[label]))
                 write_count += 1
 
         matched_count += 1
-        write_logs.append(f">>> [{ws.title}] 盤名 [{panel_name}]：寫入 {write_count} 筆")
+        write_logs.append(f">>> [{ws_name}] 盤名 [{panel_name}]：寫入 {write_count} 筆")
+        zip_entries[sheet_path] = to_xml_bytes(ws_root)
 
     output = io.BytesIO()
-    wb_write.save(output)
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for name, data in zip_entries.items():
+            zout.writestr(name, data)
     output.seek(0)
 
     return {
