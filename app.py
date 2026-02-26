@@ -122,6 +122,27 @@ def build_data_maps(cleaned_df: pd.DataFrame) -> dict:
     return all_data_maps
 
 
+def to_excel_value(value):
+    """Convert textual numbers to numeric values to avoid Excel warning icons."""
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, (int, float)):
+        return value
+
+    text = str(value).strip()
+    if text == "":
+        return None
+
+    # Remove thousands separators before numeric parsing.
+    candidate = text.replace(",", "")
+    try:
+        number = float(candidate)
+        return int(number) if number.is_integer() else number
+    except ValueError:
+        return text
+
+
 def process_workbook(source_files, target_file):
     all_structured_data = []
     parse_logs = []
@@ -193,7 +214,7 @@ def process_workbook(source_files, target_file):
         for r in range(1, ws.max_row + 1):
             label = ws[f"CN{r}"].value
             if label is not None and label in current_map:
-                ws[f"CO{r}"].value = current_map[label]
+                ws[f"CO{r}"].value = to_excel_value(current_map[label])
                 write_count += 1
 
         matched_count += 1
