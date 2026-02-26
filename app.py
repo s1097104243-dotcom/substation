@@ -249,8 +249,8 @@ def render_template_downloads() -> None:
 
 
 st.set_page_config(page_title="Protection Substation Tool", layout="wide")
-st.title("Protection 變電所報告轉換")
-st.caption("上傳來源報告（可多個）與目標檔案，產生可下載的更新結果。")
+st.title("Protection suite 綜研所變電所報告")
+
 render_template_downloads()
 st.divider()
 
@@ -300,4 +300,5 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     mime="application/vnd.ms-excel",
                     use_container_width=True,
                 )
+
 
