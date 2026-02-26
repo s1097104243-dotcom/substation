@@ -1,5 +1,282 @@
 import io
 import re
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+
+def normalize_header(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip().replace(" ", "").lower()
+
+
+def find_plan_index(row_values) -> int:
+    for i, cell in enumerate(row_values):
+        normalized = normalize_header(cell)
+        if normalized == "plan" or normalized.startswith("plan"):
+            return i
+    return -1
+
+
+def extract_structured_data(df: pd.DataFrame) -> list[dict]:
+    structured_data = []
+    current_plan_title = "未知Plan"
+    current_test_title = "未知測試項目"
+    header_row_index = -1
+    headers = []
+    header_indices = {}
+
+    for index, row in df.iterrows():
+        row_str = row.astype(str).tolist()
+
+        plan_index = find_plan_index(row.tolist())
+        if plan_index != -1:
+            plan_text = row.iloc[8] if len(row) > 8 else None
+            if pd.isna(plan_text):
+                for j in range(plan_index + 1, len(row)):
+                    if pd.notna(row.iloc[j]):
+                        plan_text = row.iloc[j]
+                        break
+            current_plan_title = str(plan_text).strip() if pd.notna(plan_text) else "未知Plan"
+            current_test_title = "未知測試項目"
+            header_row_index = -1
+            headers = []
+            header_indices = {}
+
+        if any(cell.strip().lower() == "test" for cell in row_str):
+            try:
+                test_index = next(i for i, cell in enumerate(row_str) if cell.strip().lower() == "test")
+                title_text = row.iloc[9] if len(row) > 9 else None
+                if pd.isna(title_text):
+                    for j in range(test_index + 1, len(row)):
+                        if pd.notna(row.iloc[j]):
+                            title_text = row.iloc[j]
+                            break
+                current_test_title = str(title_text).strip() if pd.notna(title_text) else "未知測試項目"
+                header_row_index = -1
+                headers = []
+                header_indices = {}
+            except Exception:
+                continue
+
+        if any("label" in cell.lower() for cell in row_str):
+            header_row_index = index
+            headers = [str(c).strip() for c in row.tolist()]
+            header_indices = {}
+            for i, cell in enumerate(row.tolist()):
+                normalized = normalize_header(cell)
+                if normalized in ("label/value", "actual", "result", "%error"):
+                    header_indices[normalized] = i
+            continue
+
+        if header_row_index != -1 and any(pd.notna(cell) for cell in row):
+            if any(cell.strip().lower() == "test" for cell in row_str):
+                header_row_index = -1
+                headers = []
+                header_indices = {}
+                continue
+
+            data_values = row.tolist()
+            if len(headers) == len(data_values) and "label/value" in header_indices:
+                data_dict = {"Plan": current_plan_title, "Test": current_test_title}
+                data_dict["Label/Value"] = data_values[header_indices["label/value"]]
+                if "actual" in header_indices:
+                    data_dict["Actual"] = data_values[header_indices["actual"]]
+                if "result" in header_indices:
+                    data_dict["Result"] = data_values[header_indices["result"]]
+                if "%error" in header_indices:
+                    data_dict["% Error"] = data_values[header_indices["%error"]]
+                structured_data.append(data_dict)
+            elif len(headers) != len(data_values):
+                header_row_index = -1
+
+    return structured_data
+
+
+def build_data_maps(cleaned_df: pd.DataFrame) -> dict:
+    all_data_maps = {}
+    plan_groups = cleaned_df.groupby("Plan", sort=False)
+
+    for plan_name, plan_df in plan_groups:
+        data_map = {}
+        for _, row in plan_df.iterrows():
+            try:
+                test_name = str(row["Test"]).strip()
+                if "復閉" in test_name or "始動" in test_name or "瞬跳" in test_name:
+                    key = test_name
+                else:
+                    raw = str(row["Label/Value"]).strip().split()[0]
+                    val = float(raw)
+                    suffix = str(int(val)) if val == int(val) else f"{val:.2f}".rstrip("0")
+                    key = f"{test_name}{suffix}"
+                data_map[key] = row["Actual"]
+            except Exception:
+                continue
+
+        sheet_name = str(plan_name).strip()
+        all_data_maps[sheet_name] = data_map
+
+    return all_data_maps
+
+
+def unique_sheet_name(raw: str, used: set[str]) -> str:
+    base = re.sub(r"[\\/*?:\[\]]", "_", raw).strip() or "Sheet"
+    base = base[:31]
+    name = base
+    idx = 1
+    while name in used:
+        suffix = f"_{idx}"
+        name = f"{base[:31-len(suffix)]}{suffix}"
+        idx += 1
+    used.add(name)
+    return name
+
+
+def build_result_excel(cleaned_df: pd.DataFrame, all_data_maps: dict) -> bytes:
+    output = io.BytesIO()
+    used_names = set()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        cleaned_df.to_excel(writer, sheet_name="CleanedData", index=False)
+
+        summary_rows = []
+        for plan_name, data_map in all_data_maps.items():
+            summary_rows.append({"Plan": plan_name, "筆數": len(data_map)})
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="PlanSummary", index=False)
+
+        for plan_name, data_map in all_data_maps.items():
+            plan_df = pd.DataFrame(
+                [{"Key": k, "Actual": v} for k, v in data_map.items()]
+            )
+            sheet_name = unique_sheet_name(str(plan_name), used_names)
+            plan_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def process_sources_only(source_files):
+    all_structured_data = []
+    parse_logs = []
+
+    for src in source_files:
+        try:
+            src.seek(0)
+            df = pd.read_excel(src, header=None)
+            structured_data = extract_structured_data(df)
+            if not structured_data:
+                parse_logs.append(f"⚠️ {src.name}: 未擷取到資料，已略過")
+                continue
+            all_structured_data.extend(structured_data)
+            parse_logs.append(f"✅ {src.name}: 擷取 {len(structured_data)} 筆")
+        except Exception as exc:
+            parse_logs.append(f"❌ {src.name}: 讀取失敗（{exc}）")
+
+    final_df = pd.DataFrame(all_structured_data)
+    if final_df.empty:
+        raise ValueError("未能成功擷取任何來源資料，請檢查 Excel 格式")
+
+    keep_cols = ["Plan", "Test", "Label/Value", "Actual", "Result", "% Error"]
+    existing_cols = [c for c in keep_cols if c in final_df.columns]
+    cleaned_df = final_df[existing_cols].copy()
+
+    if "Actual" in cleaned_df.columns:
+        cleaned_df.loc[:, "Actual"] = cleaned_df.loc[:, "Actual"].apply(
+            lambda x: re.sub(r"[sva]", "", str(x), flags=re.IGNORECASE) if pd.notna(x) else x
+        )
+
+    all_data_maps = build_data_maps(cleaned_df)
+    if not all_data_maps:
+        raise ValueError("沒有可用的 Plan 對應資料")
+
+    result_bytes = build_result_excel(cleaned_df, all_data_maps)
+    write_logs = [f">>> [{plan}]：輸出 {len(data_map)} 筆" for plan, data_map in all_data_maps.items()]
+
+    return {
+        "file_bytes": result_bytes,
+        "parse_logs": parse_logs,
+        "write_logs": write_logs,
+        "source_count": len(source_files),
+        "row_count": len(cleaned_df),
+        "plan_count": len(all_data_maps),
+    }
+
+
+def render_template_downloads() -> None:
+    st.subheader("檔案下載")
+    assets = [
+        (
+            Path("assets") / "公版_IED試驗報告.xlsm",
+            "下載試驗報告",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ),
+        (
+            Path("assets") / "公版_變電所_測試程序.psx",
+            "下載測試程序",
+            "application/octet-stream",
+        ),
+    ]
+
+    for path, label, mime in assets:
+        if path.exists():
+            with path.open("rb") as f:
+                st.download_button(
+                    label=label,
+                    data=f.read(),
+                    file_name=path.name,
+                    mime=mime,
+                    use_container_width=True,
+                )
+        else:
+            st.info(f"尚未找到 `{path}`")
+
+
+st.set_page_config(page_title="Protection Substation Tool", layout="wide")
+st.title("Protection suite 綜研所變電所報告")
+st.caption("雲端僅產生結果資料檔，不直接改寫公版 xlsm，以避免按鈕與控制項遺失。")
+
+render_template_downloads()
+st.divider()
+
+source_uploads = st.file_uploader(
+    "來源資料檔案（可多選）",
+    type=["xlsx", "xlsm", "xls"],
+    accept_multiple_files=True,
+)
+
+if st.button("產生結果資料檔", type="primary", use_container_width=True):
+    if not source_uploads:
+        st.error("請至少上傳 1 個來源檔案。")
+    else:
+        with st.spinner("處理中，請稍候..."):
+            try:
+                result = process_sources_only(source_uploads)
+            except Exception as exc:
+                st.exception(exc)
+            else:
+                st.success("處理完成！")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("來源檔數", result["source_count"])
+                c2.metric("擷取筆數", result["row_count"])
+                c3.metric("盤名數", result["plan_count"])
+
+                st.subheader("來源解析紀錄")
+                st.code("\n".join(result["parse_logs"]) or "無")
+
+                st.subheader("輸出紀錄")
+                st.code("\n".join(result["write_logs"]) or "無")
+
+                st.download_button(
+                    "下載結果資料檔（供公版 xlsm 匯入）",
+                    data=result["file_bytes"],
+                    file_name="result_for_import.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+import io
+import re
 import zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
