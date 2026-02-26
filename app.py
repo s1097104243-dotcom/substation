@@ -234,6 +234,15 @@ def process_workbook(source_files, target_file):
         "plan_count": len(all_data_maps),
     }
 
+
+def build_result_xlsx_bytes(cleaned_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        cleaned_df.to_excel(writer, sheet_name="CleanedData", index=False)
+    output.seek(0)
+    return output.getvalue()
+
+
 def render_template_downloads() -> None:
     st.subheader("檔案下載")
 
@@ -316,6 +325,15 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     data=result["file_bytes"],
                     file_name=out_name,
                     mime="application/vnd.ms-excel",
+                    use_container_width=True,
+                )
+
+                xlsx_bytes = build_result_xlsx_bytes(result["cleaned_df"])
+                st.download_button(
+                    "下載結果資料 xlsx",
+                    data=xlsx_bytes,
+                    file_name="result_for_import.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
 
