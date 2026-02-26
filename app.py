@@ -220,13 +220,13 @@ def render_template_downloads() -> None:
 
     assets = [
         (
-            Path("assets") / "變電所公版.xlsx",
-            "下載公版 Excel（變電所公版.xlsx）",
+            Path("assets") / "公版_IED試驗報告.xlsx",
+            "下載公版 Excel（公版_IED試驗報告.xlsx）",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
         (
-            Path("assets") / "PSX測試程序.psx",
-            "下載 PSX 測試程序（PSX測試程序.psx）",
+            Path("assets") / "公版_變電所_測試程序.psx",
+            "下載 PSX 測試程序（公版_變電所_測試程序.psx）",
             "application/octet-stream",
         ),
     ]
@@ -297,3 +297,4 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     mime="application/vnd.ms-excel",
                     use_container_width=True,
                 )
+
