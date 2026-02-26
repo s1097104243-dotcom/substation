@@ -289,9 +289,6 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                 st.subheader("寫入紀錄")
                 st.code("\n".join(result["write_logs"]) or "無")
 
-                st.subheader("擷取資料預覽")
-                st.dataframe(result["cleaned_df"].head(200), use_container_width=True)
-
                 out_name = f"updated_{Path(target_upload.name).name}"
                 st.download_button(
                     "下載更新後檔案",
@@ -300,5 +297,4 @@ if st.button("開始轉換", type="primary", use_container_width=True):
                     mime="application/vnd.ms-excel",
                     use_container_width=True,
                 )
-
 
