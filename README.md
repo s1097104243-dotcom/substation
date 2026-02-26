@@ -14,7 +14,7 @@
 
 若要在 App 顯示下載按鈕，請將檔案放在 `assets/` 並使用以下檔名：
 
-- `assets/公版_IED試驗報告.xlsx`
+- `assets/公版_IED試驗報告.xlsm`
 - `assets/公版_變電所_測試程序.psx`
 
 ## 本機執行
@@ -46,3 +46,4 @@ streamlit run app.py
 - 目前目標檔案僅支援 `.xlsx` / `.xlsm`（`openpyxl` 限制）
 - 若 `O1` 是公式，需先在 Excel 儲存過一次，讓快取值可被讀取
 - Streamlit 雲端環境不支援 `xlwings` / `tkinter` 視窗操作，因此改為網頁上傳下載流程
+
